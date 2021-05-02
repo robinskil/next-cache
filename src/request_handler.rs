@@ -30,7 +30,6 @@ impl RequestHandler {
     pub async fn start_handling(self, memory_cache: DashMap<String, Vec<u8>>) {
         let cache = Arc::new(memory_cache);
         while let Some(stream) = self.listener.incoming().next().await {
-            println!("Got tcp stream connection");
             let stream = stream.ok().unwrap();
             let clone = cache.clone();
             let auth_cloned_ref = self.authentication.clone();
@@ -136,15 +135,18 @@ pub enum ClientRequestResult {
 mod tests {
 
     use super::*;
+    use async_std::task;
     use byteorder::{ByteOrder, LittleEndian, ReadBytesExt};
     use futures::io::Error;
     use futures::task::{Context, Poll};
-    use std::cmp::min;
-    use std::pin::Pin;
+    use std::sync::Mutex;
+    use std::{cmp::min, time::Duration};
+    use std::{pin::Pin, thread};
 
+    #[derive(Debug, Clone)]
     struct MockTcpStream {
-        read_data: Vec<u8>,
-        write_data: Vec<u8>,
+        read_data: Arc<Mutex<Vec<u8>>>,
+        write_data: Arc<Mutex<Vec<u8>>>,
     }
 
     impl Read for MockTcpStream {
@@ -153,8 +155,18 @@ mod tests {
             _: &mut Context,
             buf: &mut [u8],
         ) -> Poll<Result<usize, Error>> {
-            let size: usize = min(self.read_data.len(), buf.len());
-            buf[..size].copy_from_slice(&self.read_data[..size]);
+            let mut wait_for_data = true;
+            while wait_for_data {
+                let mut read_buffer = self.read_data.lock().unwrap();
+                if read_buffer.len() != 0 {
+                    wait_for_data = false;
+                }
+                thread::sleep(Duration::from_millis(100));
+            }
+            let mut read_buffer = self.read_data.lock().unwrap();
+            let size: usize = min(read_buffer.len(), buf.len());
+            buf[..size].copy_from_slice(&read_buffer[..size]);
+            *read_buffer = Vec::new();
             Poll::Ready(Ok(size))
         }
     }
@@ -165,7 +177,8 @@ mod tests {
             _: &mut Context,
             buf: &[u8],
         ) -> Poll<Result<usize, Error>> {
-            self.write_data = Vec::from(buf);
+            let mut write_buffer = self.write_data.lock().unwrap();
+            *write_buffer = Vec::from(buf);
             return Poll::Ready(Ok(buf.len()));
         }
         fn poll_flush(self: Pin<&mut Self>, _: &mut Context) -> Poll<Result<(), Error>> {
@@ -180,12 +193,12 @@ mod tests {
     impl Unpin for MockTcpStream {}
 
     fn create_valid_get_request() -> Vec<u8> {
-        const REQUESTTYPE: &[u8] = b"PUSH";
+        const REQUEST_TYPE: &[u8] = b"GET";
         const KEY: &[u8] = b"testkey";
-        let mut buffer = [0; 4 + REQUESTTYPE.len() + 1 + KEY.len()];
+        let mut buffer = [0; 4 + REQUEST_TYPE.len() + 1 + KEY.len()];
         let buffer_len = buffer.len();
         LittleEndian::write_u32_into(&[15], &mut buffer[0..4]);
-        buffer[4..7].copy_from_slice(REQUESTTYPE);
+        buffer[4..7].copy_from_slice(REQUEST_TYPE);
         buffer[7] = KEY.len() as u8;
         buffer[8..buffer_len].copy_from_slice(KEY);
         buffer.to_vec()
@@ -206,35 +219,123 @@ mod tests {
     }
 
     #[async_std::test]
-    async fn test_response_valid_get_request() {
+    async fn test_response_valid_push_request() {
         let mut stream = MockTcpStream {
-            read_data: create_valid_get_request(),
-            write_data: Vec::new(),
+            read_data: Arc::new(Mutex::new(create_valid_push_request())),
+            write_data: Arc::new(Mutex::new(Vec::new())),
         };
-        let handle = spawn(handle_connection(stream, Arc::new(DashMap::new()), None));
+        let mut handle = spawn(handle_connection(
+            stream.clone(),
+            Arc::new(DashMap::new()),
+            None,
+        ));
+        task::sleep(Duration::from_secs(1)).await;
+        drop(handle);
+        let res = stream.write_data.clone();
+        {
+            let respond_buffer = res.lock().unwrap();
+            assert_eq!(
+                respond_buffer.clone(),
+                [ClientRequestResult::SuccesfulEntry as u8]
+            );
+        }
     }
 
     #[async_std::test]
-    async fn test_parse_invalid_oversized_request() {
+    async fn test_response_valid_push_request_already_exists() {
         let mut stream = MockTcpStream {
-            read_data: create_invalid_get_request_oversized_buffer(),
-            write_data: Vec::new(),
+            read_data: Arc::new(Mutex::new(create_valid_push_request())),
+            write_data: Arc::new(Mutex::new(Vec::new())),
         };
-
-        let reg = Request::from_stream(&mut stream).await;
-
-        assert_eq!(reg, Request::Error)
+        let handle = spawn(handle_connection(
+            stream.clone(),
+            Arc::new(DashMap::new()),
+            None,
+        ));
+        task::sleep(Duration::from_secs(1)).await;
+        let res = stream.write_data.clone();
+        {
+            let respond_buffer = res.lock().unwrap();
+            assert_eq!(
+                respond_buffer.clone(),
+                [ClientRequestResult::SuccesfulEntry as u8]
+            );
+        }
+        let read_handle = stream.read_data.clone();
+        {
+            let mut handle = read_handle.lock().unwrap();
+            *handle = create_valid_push_request();
+        }
+        task::sleep(Duration::from_secs(1)).await;
+        drop(handle);
+        {
+            let respond_buffer = res.lock().unwrap();
+            assert_eq!(
+                respond_buffer.clone(),
+                [ClientRequestResult::AnotherCacheEntryExists as u8]
+            );
+        }
     }
 
     #[async_std::test]
-    async fn test_parse_invalid_request_expected_size_smaller() {
+    async fn test_response_valid_get_request_no_entry_found() {
         let mut stream = MockTcpStream {
-            read_data: create_invalid_get_request_expected_size_smaller_than_buffer(),
-            write_data: Vec::new(),
+            read_data: Arc::new(Mutex::new(create_valid_get_request())),
+            write_data: Arc::new(Mutex::new(Vec::new())),
         };
+        let handle = spawn(handle_connection(
+            stream.clone(),
+            Arc::new(DashMap::new()),
+            None,
+        ));
+        task::sleep(Duration::from_secs(1)).await;
+        drop(handle);
+        let res = stream.write_data.clone();
+        {
+            let respond_buffer = res.lock().unwrap();
+            assert_eq!(
+                respond_buffer.clone(),
+                [ClientRequestResult::NoEntryFound as u8]
+            );
+        }
+    }
 
-        let reg = Request::from_stream(&mut stream).await;
-
-        assert_eq!(reg, Request::Error)
+    #[async_std::test]
+    async fn test_response_valid_push_and_get_request() {
+        let mut stream = MockTcpStream {
+            read_data: Arc::new(Mutex::new(create_valid_push_request())),
+            write_data: Arc::new(Mutex::new(Vec::new())),
+        };
+        let mut handle = spawn(handle_connection(
+            stream.clone(),
+            Arc::new(DashMap::new()),
+            None,
+        ));
+        task::sleep(Duration::from_secs(1)).await;
+        let res = stream.write_data.clone();
+        {
+            let respond_buffer = res.lock().unwrap();
+            assert_eq!(
+                respond_buffer.clone(),
+                [ClientRequestResult::SuccesfulEntry as u8]
+            );
+        }
+        let read_handle = stream.read_data.clone();
+        {
+            let mut handle = read_handle.lock().unwrap();
+            *handle = create_valid_get_request();
+        }
+        task::sleep(Duration::from_secs(1)).await;
+        drop(handle);
+        let res = stream.write_data.clone();
+        {
+            const EXPECTED_VALUE: &[u8] = b"cachedvalue";
+            let mut expected_buffer = [0u8; 1 + EXPECTED_VALUE.len()];
+            let expected_buffer_length = expected_buffer.len();
+            expected_buffer[0] = ClientRequestResult::SuccesfulRead as u8;
+            expected_buffer[1..expected_buffer_length].copy_from_slice(EXPECTED_VALUE);
+            let respond_buffer = res.lock().unwrap();
+            assert_eq!(respond_buffer.clone(), expected_buffer);
+        }
     }
 }

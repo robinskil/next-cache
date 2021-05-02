@@ -17,7 +17,6 @@ impl Request {
         loop {
             match stream.read(&mut stack_buffer).await {
                 Ok(current_size) => {
-                    println!("current size = {}", current_size);
                     //If the size of the current bytes read = 0 then we error out.
                     //We cant read a request containing 0 bytes.
                     if current_size == 0 {
@@ -82,8 +81,6 @@ impl Request {
             let key = &request_buffer[5..key_length + 5];
             let key_string = String::from_utf8_lossy(key).to_string();
             let value_bufer = request_buffer[key_length + 5..request_buffer.len()].to_vec();
-            println!("{:#?}", value_bufer);
-            println!("length x {}", value_bufer.len());
             Request::Push(PushRequest {
                 key: key_string,
                 value: value_bufer,
