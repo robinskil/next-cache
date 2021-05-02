@@ -1,0 +1,8 @@
+{
+    "max_threads": 4,
+    "default_cache_size": 512,
+    "port": 7777,
+    "address": "127.0.0.1",
+    "auth": null,
+    "buffer_size": 256
+}
