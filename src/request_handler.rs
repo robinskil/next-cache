@@ -1,7 +1,10 @@
 use std::{net::Ipv4Addr, sync::Arc};
 
-use async_std::net::{TcpListener, TcpStream};
 use async_std::task::spawn;
+use async_std::{
+    io::BufReader,
+    net::{TcpListener, TcpStream},
+};
 
 use dashmap::DashMap;
 use futures::{AsyncWriteExt, StreamExt};
@@ -66,6 +69,10 @@ async fn handle_connection(
                 respond(&mut stream, cache_interaction_result).await;
             }
             Request::UnknownRequest => {}
+            Request::Closed => {
+                stream.close().await;
+                return Err(InternalRequestHandlingError::TcpConnectionUnsafelyClosed);
+            }
         }
     }
 }
@@ -96,9 +103,10 @@ async fn verify_connection(mut stream: impl Read + Write + Unpin, auth: Option<A
 fn create_response_buffer(cache_interaction_result: CacheInteractionResult) -> Vec<u8> {
     match cache_interaction_result {
         CacheInteractionResult::Found(cached_byte_stream) => {
-            let mut buffer = Vec::with_capacity(cached_byte_stream.len() + 1);
-            buffer.push(ClientRequestResult::SuccesfulRead as u8);
-            buffer.extend_from_slice(&cached_byte_stream);
+            let mut buffer = vec![0u8; cached_byte_stream.len() + 1];
+            let buffer_len = buffer.len();
+            buffer[0] = ClientRequestResult::SuccesfulRead as u8;
+            buffer[1..buffer_len].copy_from_slice(&cached_byte_stream);
             buffer
         }
         CacheInteractionResult::NoEntryFound => {

@@ -1,5 +1,5 @@
 {
-    "max_threads": 4,
+    "max_threads": 12,
     "default_cache_size": 512,
     "port": 7777,
     "address": "127.0.0.1",

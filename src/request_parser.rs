@@ -1,4 +1,4 @@
-use async_std::io::{Read, Write};
+use async_std::io::{BufReader, Read, Write};
 use async_std::net::TcpStream;
 use byteorder::{ByteOrder, LittleEndian, ReadBytesExt};
 use futures::AsyncReadExt;
@@ -8,20 +8,23 @@ impl Request {
     pub const MAX_STACK_BUFFER_SIZE: usize = 256;
 
     pub async fn from_stream(mut stream: impl Read + Write + Unpin) -> Request {
+        let mut reader = BufReader::new(stream);
         let mut current_buffer_size = 0;
         let mut expected_buffer_size = 0;
         let mut is_new_req = true;
         let mut complete_buffer = Vec::new();
         let mut stack_buffer = [0; Request::MAX_STACK_BUFFER_SIZE];
-        println!("Check for request");
+        let mut vecs = vec![0u8; 100];
         loop {
-            match stream.read(&mut stack_buffer).await {
+            match reader.read(&mut stack_buffer).await {
                 Ok(current_size) => {
+                    // return Request::Get(GetRequest {
+                    //     key: String::from(""),
+                    // });
                     //If the size of the current bytes read = 0 then we error out.
                     //We cant read a request containing 0 bytes.
                     if current_size == 0 {
-                        println!("Error request");
-                        return Request::Error;
+                        return Request::Closed;
                     } else {
                         //If this is the first buffer of the request then we:
                         //Take the first 4 bytes and set the expected buffer size using little endian (x86)
@@ -31,7 +34,6 @@ impl Request {
                             let mut cursor = Cursor::new(&stack_buffer[0..4]);
                             expected_buffer_size =
                                 cursor.read_u32::<LittleEndian>().unwrap() as usize;
-                            println!("Expected size = {}", expected_buffer_size);
                             complete_buffer = stack_buffer[4..stack_buffer.len()].to_vec();
                             is_new_req = false;
                         }
@@ -42,7 +44,6 @@ impl Request {
                         current_buffer_size += current_size;
                         //If the buffer is the size of the expected buffer size that's decided in the first stack buffer of the request
                         if current_buffer_size == expected_buffer_size {
-                            println!("valid request");
                             let req =
                                 Request::from_buf(&complete_buffer[..expected_buffer_size - 4]);
                             return req;
@@ -107,6 +108,7 @@ pub enum Request {
     Get(GetRequest),
     Push(PushRequest),
     UnknownRequest,
+    Closed,
     Error,
 }
 
