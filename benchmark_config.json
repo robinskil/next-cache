@@ -1,0 +1,8 @@
+{
+    "host": "127.0.0.1",
+    "port": 7777,
+    "key_length": 5,
+    "value_length": 5,
+    "total_requests": 1000000,
+    "num_concurrent_clients": 50
+}
